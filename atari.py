@@ -11,13 +11,19 @@ from datetime import datetime
 from scipy.misc import imresize
 from collections import deque
 
-HEIGHT = 81
-WIDTH = 72
+STATE_SIZE = [81, 72, 4]
 
-MIN_EXPERIENCES = 5000
-MAX_EXPERIENCES = 50000
+# Training parameters
+NUM_EPISODES = 10000
 TARGET_UPDATE_PERIOD = 10000
+BATCH_SIZE = 32
+MIN_EXPERIENCES = 500
+MAX_EXPERIENCES = 5000
 
+# Q-learning parameters
+GAMMA = 0.99
+
+ENVIRONMENT = "Breakout-v0"
 
 def preprocess_frame(frame):
     # 81x72
@@ -28,6 +34,7 @@ def preprocess_frame(frame):
     frame = frame / 255.0  # Normalize pixel values
 
     return frame
+
 
 def stack_frames(frame_deque, frame, is_new_episode):
     if is_new_episode:
@@ -41,52 +48,64 @@ def stack_frames(frame_deque, frame, is_new_episode):
         frame_deque.append(frame)
 
         # Stack the frames
-        stacked_state = np.stack(frame_deque, axis=0)
+        stacked_state = np.stack(frame_deque, axis=2)
 
     else:
         # Append frame to deque, automatically removes the oldest frame
         frame_deque.append(frame)
-        stacked_state = np.stack(frame_deque, axis=0)
+        stacked_state = np.stack(frame_deque, axis=2)
 
     return stacked_state, frame_deque
 
 
 
 class DQN:
-    def __init__(self, n_outputs, conv_layer_sizes, hidden_layer_sizes, gamma, scope, max_experiences, min_experiences,
+    def __init__(self, action_size, gamma, scope, max_experiences, min_experiences,
                  batch_size):
-        self.n_outputs = n_outputs
+        self.action_size = action_size
         self.scope = scope
 
         with tf.variable_scope(scope):
-            self.X = tf.placeholder(tf.float32, shape=(None, 4, HEIGHT, WIDTH), name='X')
-            self.G = tf.placeholder(tf.float32, (None,), name='G')
+            self.input = tf.placeholder(tf.float32, shape=(None, *STATE_SIZE), name='inputs')
             self.actions = tf.placeholder(tf.int32, (None, ), "actions")
 
-        Z = self.X
-        Z = tf.transpose(Z, [0, 2,3,1])
+            self.target_Q = tf.placeholder(tf.float32, (None,), name='target_Q')
 
-        for num_output_filters, filtersz, poolsz in conv_layer_sizes:
-            Z = tf.contrib.layers.conv2d(
-                Z,
-                num_output_filters,
-                filtersz,
-                poolsz,
-                activation_fn = tf.nn.relu
-            )
+        self.conv1 = tf.contrib.layers.conv2d(
+            self.input,
+            32,
+            8,
+            4,
+            activation_fn = tf.nn.relu
+        )
 
-        Z = tf.contrib.layers.flatten(Z)
-        for M in hidden_layer_sizes:
-            Z = tf.contrib.layers.fully_connected(Z, M)
+        self.conv2 = tf.contrib.layers.conv2d(
+            self.conv1,
+            64,
+            4,
+            2,
+            activation_fn = tf.nn.relu
+        )
 
-        self.predict_op = tf.contrib.layers.fully_connected(Z, n_outputs)
+        self.conv3 = tf.contrib.layers.conv2d(
+            self.conv2,
+            64,
+            3,
+            1,
+            activation_fn = tf.nn.relu
+        )
+
+        self.flatten = tf.contrib.layers.flatten(self.conv3)
+        self.fully_connected = tf.contrib.layers.fully_connected(self.flatten, 512)
+
+        self.output = tf.contrib.layers.fully_connected(self.fully_connected, self.action_size)
 
         selected_action_values = tf.reduce_sum(
-            self.predict_op * tf.one_hot(self.actions, n_outputs),
+            self.output * tf.one_hot(self.actions, action_size),
             reduction_indices=[1]
         )
 
-        cost = tf.reduce_sum(tf.square(self.G - selected_action_values))
+        cost = tf.reduce_sum(tf.square(self.target_Q - selected_action_values))
         self.train_op = tf.train.RMSPropOptimizer(0.00025, 0.99, 0.0, 1e-6).minimize(cost)
 
         self.cost = cost
@@ -117,14 +136,14 @@ class DQN:
 
 
     def predict(self, X):
-        return self.session.run(self.predict_op, feed_dict={self.X: X})
+        return self.session.run(self.output, feed_dict={self.input: X})
 
     def update(self, states, actions, targets):
         cost, _ = self.session.run(
             [self.cost, self.train_op],
             feed_dict= {
-                self.X : states,
-                self.G : targets,
+                self.input : states,
+                self.target_Q : targets,
                 self.actions : actions
             }
         )
@@ -133,7 +152,7 @@ class DQN:
 
     def sample_action(self, state, eps):
         if np.random.random() < eps:
-            return np.random.choice(self.n_outputs)
+            return np.random.choice(self.action_size)
         else:
             return np.argmax(self.predict([state])[0])
 
@@ -165,7 +184,7 @@ def play_one(env,
     raw_frame = env.reset()
     frame = preprocess_frame(raw_frame)
     state, frame_deque = stack_frames(None, frame, True)
-    assert(state.shape == (4, 81, 72))
+    assert (state.shape == (81, 72, 4))
     loss = None
 
     total_time_training = 0
@@ -184,10 +203,10 @@ def play_one(env,
         raw_frame, reward, done, _ = env.step(action)
         frame = preprocess_frame(raw_frame)
 
-        next_state = np.append(state[1:], np.expand_dims(frame, 0), axis=0)
-        assert (state.shape == (4, 81, 72))
+        next_state, frame_deque = stack_frames(frame_deque, frame, False)
+        assert(next_state.shape == (81, 72, 4))
 
-        episode_reward+=reward
+        episode_reward += reward
 
         if len(experience_replay_buffer) == MAX_EXPERIENCES:
             experience_replay_buffer.pop(0)
@@ -210,17 +229,10 @@ def play_one(env,
                 datetime.now() - t0), num_steps_in_episode, total_time_training / num_steps_in_episode, epsilon
 
 if __name__ == '__main__':
-
-    conv_layer_sizes = [(32, 8, 4), (64, 4, 2), (64, 3, 1)]
-    hidden_layer_sizes = [512]
-
-    gamma = 0.99
-    batch_size = 32
-    num_episodes = 10000
     total_t = 0
     experience_replay_buffer = []
 
-    episode_rewards = np.zeros(num_episodes)
+    episode_rewards = np.zeros(NUM_EPISODES)
 
     epsilon = 1.0
     epsilon_min = 0.1
@@ -233,24 +245,20 @@ if __name__ == '__main__':
 
     model = DQN(
         env.action_space.n,
-        conv_layer_sizes,
-        hidden_layer_sizes,
-        gamma,
+        GAMMA,
         "model",
         MAX_EXPERIENCES,
         MIN_EXPERIENCES,
-        batch_size
+        BATCH_SIZE
     )
 
     target_model = DQN(
         env.action_space.n,
-        conv_layer_sizes,
-        hidden_layer_sizes,
-        gamma,
+        GAMMA,
         "target_model",
         MAX_EXPERIENCES,
         MIN_EXPERIENCES,
-        batch_size
+        BATCH_SIZE
     )
 
     with tf.Session() as sess:
@@ -265,7 +273,7 @@ if __name__ == '__main__':
 
         state, frame_deque = stack_frames(None, frame, True)
 
-        assert(state.shape == (4, 81, 72))
+        assert(state.shape == (81, 72, 4))
 
         for i in range(MIN_EXPERIENCES):
 
@@ -273,7 +281,7 @@ if __name__ == '__main__':
             raw_frame, reward, done, _ = env.step(action)
             frame = preprocess_frame(raw_frame)
             next_state, frame_deque = stack_frames(frame_deque, frame, False)
-            assert (state.shape == (4, 81, 72))
+            assert (state.shape == (81, 72, 4))
             experience_replay_buffer.append((state, action, reward, next_state, done))
 
             if done:
@@ -283,16 +291,16 @@ if __name__ == '__main__':
             else:
                 state = next_state
 
-        print("STARTING TRAINING for {} episodes".format(num_episodes))
-        for i in range(num_episodes):
+        print("STARTING TRAINING for {} episodes".format(NUM_EPISODES))
+        for i in range(NUM_EPISODES):
             total_t, episode_reward, duration, num_steps_in_ep, time_per_step, epsilon = play_one(
                 env,
                 total_t,
                 experience_replay_buffer,
                 model,
                 target_model,
-                gamma,
-                batch_size,
+                GAMMA,
+                BATCH_SIZE,
                 epsilon,
                 epsilon_change,
                 epsilon_min
@@ -309,4 +317,7 @@ if __name__ == '__main__':
                   "Epsilon:", "%.3f" % epsilon
                   )
             sys.stdout.flush()
+            print(len(frame_deque))
+            print(len(state))
+            print(len(experience_replay_buffer))
 
