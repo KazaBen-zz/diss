@@ -95,6 +95,7 @@ class DQN:
                                                512,
                                                kernel_initializer=tf.variance_scaling_initializer(scale=2))
 
+        # Combining value and advantage into Q-values as described above
         self.q_values = tf.layers.dense(self.fully_connected,
                                       self.n_actions,
                                       kernel_initializer=tf.variance_scaling_initializer(scale=2))
@@ -111,9 +112,8 @@ class DQN:
         self.Q = tf.reduce_sum(tf.multiply(self.q_values, tf.one_hot(self.action, self.n_actions, dtype=tf.float32)),
                                axis=1)
 
-        self.loss = tf.reduce_sum(tf.square(self.target_q - self.Q))
         # Parameter updates
-        # self.loss = tf.reduce_mean(tf.losses.huber_loss(labels=self.target_q, predictions=self.Q))
+        self.loss = tf.reduce_sum(tf.square(self.target_q - self.Q))
         self.optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
         self.update = self.optimizer.minimize(self.loss)
 
@@ -419,7 +419,7 @@ DISCOUNT_FACTOR = 0.99           # gamma in the Bellman equation
 REPLAY_MEMORY_START_SIZE = 50000 # Number of completely random actions,
                                  # before the agent starts learning
 MAX_FRAMES = 30000000            # Total number of frames the agent sees
-MEMORY_SIZE = 500000            # Number of transitions stored in the replay memory
+MEMORY_SIZE = 1000000            # Number of transitions stored in the replay memory
 NO_OP_STEPS = 10                 # Number of 'NOOP' or 'FIRE' actions at the beginning of an
                                  # evaluation episode
 UPDATE_FREQ = 4                  # Every four actions a gradient descend step is performed
